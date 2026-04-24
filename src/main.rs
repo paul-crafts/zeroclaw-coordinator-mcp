@@ -239,17 +239,23 @@ impl Server {
 
     fn list_files(&self) -> Result<Vec<String>> {
         let mut files = Vec::new();
-        for entry in walkdir::WalkDir::new(&self.workspace) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            #[allow(clippy::collapsible_if)]
-            if entry.file_type().is_file() {
-                if let Ok(rel_path) = entry.path().strip_prefix(&self.workspace) {
-                    if let Some(name) = rel_path.to_str() {
+        let mut unique_roots = HashSet::new();
+        unique_roots.insert(&self.workspace);
+        for root in &self.whitelist {
+            unique_roots.insert(root);
+        }
+
+        for root in unique_roots {
+            for entry in walkdir::WalkDir::new(root) {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                #[allow(clippy::collapsible_if)]
+                if entry.file_type().is_file() {
+                    if let Some(path_str) = entry.path().to_str() {
                         if self.validate_path(entry.path()).is_ok() {
-                            files.push(name.to_string());
+                            files.push(path_str.to_string());
                         }
                     }
                 }
@@ -264,6 +270,7 @@ impl Server {
         } else {
             self.workspace.join(rel_path)
         };
+        self.validate_path(&path)?;
         fs::read_to_string(path).context("Failed to read file")
     }
 
@@ -273,6 +280,7 @@ impl Server {
         } else {
             self.workspace.join(rel_path)
         };
+        self.validate_path(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("Failed to create parent directories")?;
         }
@@ -281,6 +289,7 @@ impl Server {
 
     fn set_config_value(&self, path: &str, value: &str) -> Result<()> {
         let config_path = self.workspace.join("config.toml");
+        self.validate_path(&config_path)?;
         let content = fs::read_to_string(&config_path).context("Failed to read config.toml")?;
         let mut doc: DocumentMut = content.parse().context("Failed to parse config.toml")?;
         toml_utils::set_value_by_path(&mut doc, path, value)?;
@@ -526,5 +535,41 @@ mod tests {
             std::env::remove_var("ZEROCLAW_WHITELIST");
             std::env::remove_var("ZEROCLAW_PORT");
         }
+    }
+
+    #[test]
+    fn test_complex_multi_workspace_scenario() {
+        let tmp_ws1 = tempfile::tempdir().unwrap();
+        let tmp_ws2 = tempfile::tempdir().unwrap();
+        
+        let ws1_path = tmp_ws1.path().to_path_buf();
+        let ws2_path = tmp_ws2.path().to_path_buf();
+
+        let server = Server::new(
+            ws1_path.clone(),
+            vec!["private".to_string()],
+            vec![
+                ws1_path.to_string_lossy().to_string(),
+                ws2_path.to_string_lossy().to_string(),
+            ],
+        );
+
+        // 1. Test writing to both workspaces
+        assert!(server.write_file(&ws1_path.join("public.txt").to_string_lossy(), "data1").is_ok());
+        assert!(server.write_file(&ws2_path.join("public.txt").to_string_lossy(), "data2").is_ok());
+
+        // 2. Test blacklisting in both workspaces
+        assert!(server.write_file(&ws1_path.join("private_info.txt").to_string_lossy(), "secret").is_err());
+        assert!(server.write_file(&ws2_path.join("private_info.txt").to_string_lossy(), "secret").is_err());
+
+        // 3. Test listing includes all workspaces
+        let files = server.list_files().unwrap();
+        assert!(files.iter().any(|f| f.contains("public.txt")));
+        // Should contain 2 files (one in each ws)
+        let public_files: Vec<_> = files.iter().filter(|f| f.contains("public.txt")).collect();
+        assert_eq!(public_files.len(), 2);
+
+        // 4. Test access outside both workspaces
+        assert!(server.validate_path(Path::new("/etc/shadow")).is_err());
     }
 }
