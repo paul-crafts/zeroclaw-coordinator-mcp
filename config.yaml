@@ -1,0 +1,31 @@
+name: "ZeroClaw Coordinator MCP"
+description: "Model Context Protocol (MCP) server for managing ZeroClaw configurations with ease."
+version: "0.1.2"
+slug: "zeroclaw_coordinator_mcp"
+url: "https://github.com/paul-crafts/zeroclaw-coordinator-mcp"
+image: "paulcrafts/zeroclaw-coordinator-mcp"
+icon: "mdi:robot-industrial"
+logo: true
+panel_icon: "mdi:robot-industrial"
+panel_title: "ZeroClaw Coordinator"
+homeassistant: ">=2024.1.0"
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+options:
+  workspace_path: "/config/zeroclaw"
+  blacklist: "IDENTITY.md"
+  whitelist: "/config/zeroclaw,/share/zeroclaw"
+  port: 8090
+schema:
+  workspace_path: str
+  blacklist: str
+  whitelist: str
+  port: port
+ports:
+  8090/tcp: 8090
+map:
+  - config:rw
+  - share:rw
