@@ -15,9 +15,9 @@ arch:
 startup: services
 boot: auto
 options:
-  workspace_path: "/config/zeroclaw"
-  blacklist: "IDENTITY.md"
-  whitelist: "/config/zeroclaw,/share/zeroclaw"
+  workspace_path: "/config"
+  blacklist: "secrets.yaml,IDENTITY.md,id_rsa,id_ed25519,.env"
+  whitelist: "/config,/share"
   port: 8090
 schema:
   workspace_path: str

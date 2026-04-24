@@ -88,12 +88,16 @@ When running the standalone binary, you can manage the configuration via environ
 - **`ZEROCLAW_WHITELIST`**: Comma-separated list of allowed directories.
 - **`ZEROCLAW_BLACKLIST`**: Comma-separated list of substrings to block.
 
-Example:
+Example for full Home Assistant management:
 ```bash
-export ZEROCLAW_WORKSPACE="/home/user/zeroclaw"
-export ZEROCLAW_WHITELIST="/home/user/zeroclaw,/var/log"
+export ZEROCLAW_WORKSPACE="/config"
+export ZEROCLAW_WHITELIST="/config,/share"
+export ZEROCLAW_BLACKLIST="secrets.yaml,IDENTITY.md,id_rsa,.env"
 ./zeroclaw-coordinator-mcp
 ```
+
+> [!CAUTION]
+> When setting the workspace to `/config`, ensure your **Blacklist** includes all sensitive credential files (like `secrets.yaml`) to prevent the LLM from accessing your private keys or passwords.
 
 Check the [DOCS.md](DOCS.md) for more details.
 

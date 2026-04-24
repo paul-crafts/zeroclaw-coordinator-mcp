@@ -18,9 +18,9 @@ The ZeroClaw Coordinator MCP server can be configured via the Home Assistant Add
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `workspace_path` | string | `/config/zeroclaw` | The primary directory where ZeroClaw configuration files are stored. |
+| `workspace_path` | string | `/config` | The primary directory where ZeroClaw configuration files are stored. |
 | `blacklist` | string | `IDENTITY.md` | A comma-separated list of filenames or substrings to block from access. |
-| `whitelist` | string | `/config/zeroclaw,/share/zeroclaw` | A comma-separated list of directories that are allowed to be accessed. |
+| `whitelist` | string | `/config,/share` | A comma-separated list of directories that are allowed to be accessed. |
 | `port` | integer | `8090` | The port used for the SSE transport (if enabled). |
 
 ### Environment Variables (for Standalone/Binary)
