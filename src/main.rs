@@ -319,7 +319,10 @@ async fn main() -> Result<()> {
             8090
         }
     } else {
-        8090
+        env::var("ZEROCLAW_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8090)
     };
 
     let workspace = env::var("ZEROCLAW_WORKSPACE").unwrap_or_else(|_| ".".to_string());
