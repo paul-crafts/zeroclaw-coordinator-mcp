@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::env;
+use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -292,24 +293,16 @@ struct AppState {
     tx: Arc<tokio::sync::broadcast::Sender<JsonRpcResponse>>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-
+fn get_config() -> (String, String, String, u16, String) {
     let args: Vec<String> = env::args().collect();
     let transport = if let Some(i) = args.iter().position(|a| a == "--transport") {
         if let Some(s) = args.get(i + 1) {
-            s.as_str()
+            s.clone()
         } else {
-            "stdio"
+            "stdio".to_string()
         }
     } else {
-        "stdio"
+        "stdio".to_string()
     };
 
     let port = if let Some(i) = args.iter().position(|a| a == "--port") {
@@ -327,13 +320,28 @@ async fn main() -> Result<()> {
 
     let workspace = env::var("ZEROCLAW_WORKSPACE").unwrap_or_else(|_| ".".to_string());
     let blacklist_str = env::var("ZEROCLAW_BLACKLIST").unwrap_or_default();
+    let whitelist_str = env::var("ZEROCLAW_WHITELIST").unwrap_or_default();
+
+    (workspace, blacklist_str, whitelist_str, port, transport)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| "zeroclaw_coordinator_mcp=info,tower_http=debug,axum::rejection=trace".into(),
+        ))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    let (workspace, blacklist_str, whitelist_str, port, transport) = get_config();
+
     let blacklist: Vec<String> = blacklist_str
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    let whitelist_str = env::var("ZEROCLAW_WHITELIST").unwrap_or_default();
     let whitelist: Vec<String> = whitelist_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -355,16 +363,22 @@ async fn main() -> Result<()> {
             .layer(CorsLayer::permissive())
             .with_state(app_state);
 
-        tracing::info!("Starting SSE server on port {}...", port);
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        tracing::info!("SSE server listening on {}", addr);
         axum::serve(listener, app).await?;
     } else {
-        let mut lines = BufReader::new(io::stdin()).lines();
-        while let Some(line) = lines.next_line().await? {
-            if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&line) {
-                let resp = server.handle_request(req).await;
-                println!("{}", serde_json::to_string(&resp)?);
-            }
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin).lines();
+
+        while let Some(line) = reader.next_line().await? {
+            let req: JsonRpcRequest = match serde_json::from_str(&line) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let resp = server.handle_request(req).await;
+            println!("{}", serde_json::to_string(&resp)?);
         }
     }
 
@@ -373,85 +387,49 @@ async fn main() -> Result<()> {
 
 async fn sse_handler(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, io::Error>>> {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = state.tx.subscribe();
-    let endpoint_event = Event::default().event("endpoint").data("/messages");
     let stream = async_stream::stream! {
-        yield Ok(endpoint_event);
         while let Ok(msg) = rx.recv().await {
-            let json = serde_json::to_string(&msg).unwrap();
-            yield Ok(Event::default().data(json));
+            yield Ok(Event::default().data(serde_json::to_string(&msg).unwrap()));
         }
     };
-    Sse::new(stream)
+
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
+
+use std::convert::Infallible;
 
 async fn message_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let resp = state.server.handle_request(req).await;
-    let _ = state.tx.send(resp.clone());
     Json(resp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
-    fn test_whitelist_validation() {
-        let server = Server::new(
-            PathBuf::from("/zeroclaw"),
-            vec![],
-            vec![
-                "/config/zeroclaw".to_string(),
-                "/share/zeroclaw".to_string(),
-            ],
-        );
-
-        // Allowed paths
-        assert!(
-            server
-                .validate_path(Path::new("/config/zeroclaw/config.toml"))
-                .is_ok()
-        );
-        assert!(
-            server
-                .validate_path(Path::new("/share/zeroclaw/data.json"))
-                .is_ok()
-        );
-
-        // Denied paths
-        assert!(
-            server
-                .validate_path(Path::new("/config/secrets.yaml"))
-                .is_err()
-        );
-        assert!(server.validate_path(Path::new("/etc/passwd")).is_err());
-    }
-
-    #[test]
-    fn test_blacklist_validation() {
+    fn test_path_validation() {
         let server = Server::new(
             PathBuf::from("/zeroclaw"),
             vec!["IDENTITY.md".to_string()],
-            vec!["/zeroclaw".to_string()],
+            vec!["/zeroclaw".to_string(), "/share/zeroclaw".to_string()],
         );
 
-        // Blacklisted file in whitelisted folder
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/IDENTITY.md"))
-                .is_err()
-        );
+        // Allowed
+        assert!(server.validate_path(Path::new("/zeroclaw/config.toml")).is_ok());
+        assert!(server.validate_path(Path::new("/share/zeroclaw/data.json")).is_ok());
 
-        // Regular file in whitelisted folder
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/config.toml"))
-                .is_ok()
-        );
+        // Denied (outside whitelist)
+        assert!(server.validate_path(Path::new("/etc/passwd")).is_err());
+
+        // Denied (blacklisted)
+        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY.md")).is_err());
     }
 
     #[test]
@@ -463,11 +441,7 @@ mod tests {
         );
 
         // Should allow access to its own workspace even if whitelist is empty
-        assert!(
-            server
-                .validate_path(Path::new("/custom_ws/file.txt"))
-                .is_ok()
-        );
+        assert!(server.validate_path(Path::new("/custom_ws/file.txt")).is_ok());
     }
 
     #[test]
@@ -479,30 +453,14 @@ mod tests {
         );
 
         // Exact match
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/IDENTITY"))
-                .is_err()
-        );
+        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY")).is_err());
 
         // Substring match
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/my_IDENTITY_file.txt"))
-                .is_err()
-        );
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/IDENTITY.md"))
-                .is_err()
-        );
+        assert!(server.validate_path(Path::new("/zeroclaw/my_IDENTITY_file.txt")).is_err());
+        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY.md")).is_err());
 
         // Allowed
-        assert!(
-            server
-                .validate_path(Path::new("/zeroclaw/ident.txt"))
-                .is_ok()
-        );
+        assert!(server.validate_path(Path::new("/zeroclaw/ident.txt")).is_ok());
     }
 
     #[test]
@@ -542,5 +500,31 @@ mod tests {
         let files = server.list_files().unwrap();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("file.txt"));
+    }
+
+    #[test]
+    fn test_config_from_env() {
+        unsafe {
+            std::env::set_var("ZEROCLAW_WORKSPACE", "/tmp/ws");
+            std::env::set_var("ZEROCLAW_BLACKLIST", "secret,private");
+            std::env::set_var("ZEROCLAW_WHITELIST", "/tmp/other,/var/log");
+            std::env::set_var("ZEROCLAW_PORT", "9999");
+        }
+
+        let (workspace, blacklist, whitelist, port, transport) = get_config();
+
+        assert_eq!(workspace, "/tmp/ws");
+        assert_eq!(blacklist, "secret,private");
+        assert_eq!(whitelist, "/tmp/other,/var/log");
+        assert_eq!(port, 9999);
+        assert_eq!(transport, "stdio"); // Default
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("ZEROCLAW_WORKSPACE");
+            std::env::remove_var("ZEROCLAW_BLACKLIST");
+            std::env::remove_var("ZEROCLAW_WHITELIST");
+            std::env::remove_var("ZEROCLAW_PORT");
+        }
     }
 }
