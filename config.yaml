@@ -14,16 +14,17 @@ arch:
   - amd64
 startup: services
 boot: auto
+host_network: true
 options:
   workspace_path: "/config"
   blacklist: "secrets.yaml,IDENTITY.md,id_rsa,id_ed25519,.env"
   whitelist: "/config,/share"
+  port: 8090
 schema:
   workspace_path: str
   blacklist: str
   whitelist: str
-ports:
-  8090/tcp: 8090
+  port: port
 map:
   - config:rw
   - share:rw
