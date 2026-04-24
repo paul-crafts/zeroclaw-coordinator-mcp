@@ -3,6 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/paul-crafts/zeroclaw-coordinator-mcp?style=flat-square)](https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/paul-crafts/zeroclaw-coordinator-mcp/ci.yml?branch=main&style=flat-square)](https://github.com/paul-crafts/zeroclaw-coordinator-mcp/actions)
 [![License](https://img.shields.io/github/license/paul-crafts/zeroclaw-coordinator-mcp?style=flat-square)](LICENSE)
+[![Rust](https://img.shields.io/badge/built%20with-rust-%23E32F26.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg?style=flat-square)](https://www.buymeacoffee.com/paul.crafts)
 
 ![ZeroClaw Logo](logo.png)
