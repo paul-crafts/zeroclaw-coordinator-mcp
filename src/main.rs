@@ -529,6 +529,84 @@ impl Server {
     }
 }
 
+fn configure_mcp_server(config_path: &Path, exe_path: &Path) -> Result<()> {
+    let exe_str = exe_path.to_string_lossy().to_string();
+    let content = fs::read_to_string(config_path)?;
+    let mut doc: DocumentMut = content.parse().context("Failed to parse config.toml")?;
+
+    // Ensure [mcp] exists and is enabled
+    if doc.get("mcp").is_none() {
+        doc.insert("mcp", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let mcp = doc.get_mut("mcp").unwrap();
+    mcp["enabled"] = toml_edit::value(true);
+
+    // Get or create mcp.servers array of tables
+    if mcp.get("servers").is_none() {
+        mcp.as_table_mut().unwrap().insert(
+            "servers",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+
+    let servers = mcp.get_mut("servers").unwrap();
+    if let Some(servers_array) = servers.as_array_of_tables_mut() {
+        // Check if "coordinator" already exists
+        let mut found = false;
+        for server in servers_array.iter_mut() {
+            if server.get("name").and_then(|n| n.as_str()) == Some("coordinator") {
+                server["command"] = toml_edit::value(&exe_str);
+                let mut args = toml_edit::Array::new();
+                args.push("--transport");
+                args.push("stdio");
+                server["args"] = toml_edit::Item::Value(toml_edit::Value::Array(args));
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            let mut new_server = toml_edit::Table::new();
+            new_server.insert("name", toml_edit::value("coordinator"));
+            new_server.insert("transport", toml_edit::value("stdio"));
+            new_server.insert("command", toml_edit::value(&exe_str));
+            let mut args = toml_edit::Array::new();
+            args.push("--transport");
+            args.push("stdio");
+            new_server.insert(
+                "args",
+                toml_edit::Item::Value(toml_edit::Value::Array(args)),
+            );
+            servers_array.push(new_server);
+        }
+    }
+
+    fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+fn run_setup() -> Result<()> {
+    let home = env::var("HOME").context("Failed to get HOME environment variable")?;
+    let config_dir = Path::new(&home).join(".zeroclaw");
+    let config_path = config_dir.join("config.toml");
+
+    if !config_path.exists() {
+        return Err(anyhow!(
+            "ZeroClaw config not found at {}. Please run 'zeroclaw onboard' first.",
+            config_path.display()
+        ));
+    }
+
+    let exe_path = env::current_exe()?.canonicalize()?;
+    configure_mcp_server(&config_path, &exe_path)?;
+
+    println!(
+        "Successfully configured coordinator MCP in {}",
+        config_path.display()
+    );
+    Ok(())
+}
+
 struct AppState {
     server: Arc<Server>,
     tx: Arc<tokio::sync::broadcast::Sender<JsonRpcResponse>>,
@@ -568,6 +646,12 @@ fn get_config() -> (String, String, String, u16, String) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|a| a == "--setup") {
+        run_setup()?;
+        return Ok(());
+    }
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -969,5 +1053,35 @@ mod tests {
         server.rollback().unwrap(); // undo second append
         let content = fs::read_to_string(workspace.join(file_path)).unwrap();
         assert_eq!(content, "line 1\n");
+    }
+
+    #[test]
+    fn test_setup_command_logic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let exe_path = PathBuf::from("/usr/local/bin/coordinator");
+
+        // 1. Initial config
+        fs::write(&config_path, "default_provider = \"anthropic\"\n").unwrap();
+
+        // 2. Run configuration
+        configure_mcp_server(&config_path, &exe_path).unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[mcp]"));
+        assert!(content.contains("enabled = true"));
+        assert!(content.contains("[[mcp.servers]]"));
+        assert!(content.contains("name = \"coordinator\""));
+        assert!(content.contains("command = \"/usr/local/bin/coordinator\""));
+
+        // 3. Run again, should update (or stay same)
+        let new_exe = PathBuf::from("/opt/bin/coordinator");
+        configure_mcp_server(&config_path, &new_exe).unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("command = \"/opt/bin/coordinator\""));
+        // Should still only have one coordinator
+        let count = content.matches("name = \"coordinator\"").count();
+        assert_eq!(count, 1);
     }
 }
