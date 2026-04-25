@@ -29,6 +29,21 @@ Click the button below to add this repository to your Home Assistant instance:
 ### 📦 Standalone Binaries
 For non-Home Assistant users or advanced setups, pre-compiled binaries are available for Linux, macOS, and Windows on the [Releases page](https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases).
 
+### 🤖 Instructions for Coordinator Agents
+If you are an AI coordinator agent tasked with running this MCP server directly, follow these steps to download and launch it via the command line:
+
+1. **Download the executable** for your current OS and architecture (e.g., `linux-amd64`, `macos-arm64`).
+   ```bash
+   curl -L -o zeroclaw-coordinator-mcp https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases/latest/download/zeroclaw-coordinator-mcp-linux-amd64
+   chmod +x zeroclaw-coordinator-mcp
+   ```
+2. **Launch with stdio transport** to allow direct interaction via standard input/output:
+   ```bash
+   export ZEROCLAW_WORKSPACE="$(pwd)"
+   ./zeroclaw-coordinator-mcp --transport stdio
+   ```
+   Once running, you can communicate with the server using the MCP JSON-RPC protocol over `stdio`.
+
 ---
 
 ## 🔗 Integration

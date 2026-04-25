@@ -16,6 +16,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use toml_edit::DocumentMut;
 use tower_http::cors::CorsLayer;
@@ -46,14 +47,89 @@ struct JsonRpcError {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ChangeType {
+    Update,
+    Create,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryEntry {
+    timestamp: u64,
+    path: PathBuf,
+    change_type: ChangeType,
+    backup_file: Option<String>, // Filename in history directory
+}
+
+struct HistoryManager {
+    history_dir: PathBuf,
+    limit: usize,
+}
+
+impl HistoryManager {
+    fn new(history_dir: PathBuf, limit: usize) -> Self {
+        if !history_dir.exists() {
+            let _ = fs::create_dir_all(&history_dir);
+        }
+        Self { history_dir, limit }
+    }
+
+    fn get_manifest_path(&self) -> PathBuf {
+        self.history_dir.join("history.json")
+    }
+
+    fn load_history(&self) -> Vec<HistoryEntry> {
+        let path = self.get_manifest_path();
+        if let Ok(content) = fs::read_to_string(path) {
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn save_history(&self, history: &[HistoryEntry]) -> Result<()> {
+        let path = self.get_manifest_path();
+        let content = serde_json::to_string_pretty(history)?;
+        fs::write(path, content).context("Failed to save history manifest")
+    }
+
+    fn add_entry(&self, entry: HistoryEntry) -> Result<()> {
+        let mut history = self.load_history();
+        history.push(entry);
+
+        // Enforce limit
+        while history.len() > self.limit {
+            let removed = history.remove(0);
+            if let Some(backup_file) = removed.backup_file {
+                let _ = fs::remove_file(self.history_dir.join(backup_file));
+            }
+        }
+
+        self.save_history(&history)
+    }
+
+    fn pop_entry(&self) -> Option<HistoryEntry> {
+        let mut history = self.load_history();
+        let entry = history.pop()?;
+        let _ = self.save_history(&history);
+        Some(entry)
+    }
+}
+
 struct Server {
     workspace: PathBuf,
     blacklist: HashSet<String>,
     whitelist: Vec<PathBuf>,
+    history: HistoryManager,
 }
 
 impl Server {
-    fn new(workspace: PathBuf, blacklist: Vec<String>, whitelist: Vec<String>) -> Self {
+    fn new(
+        workspace: PathBuf,
+        blacklist: Vec<String>,
+        whitelist: Vec<String>,
+        history_dir: PathBuf,
+    ) -> Self {
         let mut bl = HashSet::from_iter(blacklist);
         bl.insert("zeroclaw-coordinator-mcp".to_string());
 
@@ -67,6 +143,7 @@ impl Server {
             workspace,
             blacklist: bl,
             whitelist: wl,
+            history: HistoryManager::new(history_dir, 10),
         }
     }
 
@@ -157,6 +234,11 @@ impl Server {
                                 },
                                 "required": ["path", "value"]
                             }
+                        },
+                        {
+                            "name": "rollback",
+                            "description": "Rollback the last change made by the server",
+                            "inputSchema": { "type": "object", "properties": {} }
                         }
                     ]
                 })),
@@ -212,6 +294,13 @@ impl Server {
                             Err(e) => self.error(req.id, -32000, e.to_string()),
                         }
                     }
+                    "rollback" => match self.rollback() {
+                        Ok(msg) => self.success(
+                            req.id,
+                            json!({ "content": [{ "type": "text", "text": msg }] }),
+                        ),
+                        Err(e) => self.error(req.id, -32000, e.to_string()),
+                    },
                     _ => self.error(req.id, -32601, "Method not found".to_string()),
                 }
             }
@@ -281,6 +370,7 @@ impl Server {
             self.workspace.join(rel_path)
         };
         self.validate_path(&path)?;
+        self.record_change(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("Failed to create parent directories")?;
         }
@@ -290,10 +380,65 @@ impl Server {
     fn set_config_value(&self, path: &str, value: &str) -> Result<()> {
         let config_path = self.workspace.join("config.toml");
         self.validate_path(&config_path)?;
+        self.record_change(&config_path)?;
         let content = fs::read_to_string(&config_path).context("Failed to read config.toml")?;
         let mut doc: DocumentMut = content.parse().context("Failed to parse config.toml")?;
         toml_utils::set_value_by_path(&mut doc, path, value)?;
         fs::write(config_path, doc.to_string()).context("Failed to save config.toml")
+    }
+
+    fn record_change(&self, path: &Path) -> Result<()> {
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs();
+        if path.exists() {
+            let old_content = fs::read_to_string(path)?;
+            let filename = path
+                .file_name()
+                .ok_or_else(|| anyhow!("No filename"))?
+                .to_string_lossy();
+            let backup_filename = format!("{}_{}", timestamp, filename);
+            fs::write(self.history.history_dir.join(&backup_filename), old_content)?;
+            self.history.add_entry(HistoryEntry {
+                timestamp,
+                path: path.to_path_buf(),
+                change_type: ChangeType::Update,
+                backup_file: Some(backup_filename),
+            })?;
+        } else {
+            self.history.add_entry(HistoryEntry {
+                timestamp,
+                path: path.to_path_buf(),
+                change_type: ChangeType::Create,
+                backup_file: None,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<String> {
+        if let Some(entry) = self.history.pop_entry() {
+            match entry.change_type {
+                ChangeType::Update => {
+                    let backup_file = entry
+                        .backup_file
+                        .ok_or_else(|| anyhow!("Missing backup file"))?;
+                    let backup_path = self.history.history_dir.join(&backup_file);
+                    let content = fs::read_to_string(&backup_path)?;
+                    fs::write(&entry.path, content)?;
+                    let _ = fs::remove_file(backup_path);
+                    Ok(format!("Rolled back update to {:?}", entry.path))
+                }
+                ChangeType::Create => {
+                    if entry.path.exists() {
+                        fs::remove_file(&entry.path)?;
+                    }
+                    Ok(format!("Rolled back creation of {:?}", entry.path))
+                }
+            }
+        } else {
+            Err(anyhow!("No history to rollback"))
+        }
     }
 }
 
@@ -337,9 +482,11 @@ fn get_config() -> (String, String, String, u16, String) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-            |_| "zeroclaw_coordinator_mcp=info,tower_http=debug,axum::rejection=trace".into(),
-        ))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "zeroclaw_coordinator_mcp=info,tower_http=debug,axum::rejection=trace".into()
+            }),
+        )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
@@ -357,7 +504,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let server = Arc::new(Server::new(PathBuf::from(workspace), blacklist, whitelist));
+    let history_dir = env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".zeroclaw/mcp-coordinator/history"))
+        .unwrap_or_else(|_| PathBuf::from(".zeroclaw_history"));
+
+    let server = Arc::new(Server::new(
+        PathBuf::from(workspace),
+        blacklist,
+        whitelist,
+        history_dir,
+    ));
 
     if transport == "sse" {
         let (tx, _) = tokio::sync::broadcast::channel(100);
@@ -424,60 +580,100 @@ mod tests {
 
     #[test]
     fn test_path_validation() {
+        let temp_history = tempfile::tempdir().unwrap();
         let server = Server::new(
             PathBuf::from("/zeroclaw"),
             vec!["IDENTITY.md".to_string()],
             vec!["/zeroclaw".to_string(), "/share/zeroclaw".to_string()],
+            temp_history.path().to_path_buf(),
         );
 
         // Allowed
-        assert!(server.validate_path(Path::new("/zeroclaw/config.toml")).is_ok());
-        assert!(server.validate_path(Path::new("/share/zeroclaw/data.json")).is_ok());
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/config.toml"))
+                .is_ok()
+        );
+        assert!(
+            server
+                .validate_path(Path::new("/share/zeroclaw/data.json"))
+                .is_ok()
+        );
 
         // Denied (outside whitelist)
         assert!(server.validate_path(Path::new("/etc/passwd")).is_err());
 
         // Denied (blacklisted)
-        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY.md")).is_err());
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/IDENTITY.md"))
+                .is_err()
+        );
     }
 
     #[test]
     fn test_workspace_fallback_validation() {
+        let temp_history = tempfile::tempdir().unwrap();
         let server = Server::new(
             PathBuf::from("/custom_ws"),
             vec![],
             vec![], // Empty whitelist
+            temp_history.path().to_path_buf(),
         );
 
         // Should allow access to its own workspace even if whitelist is empty
-        assert!(server.validate_path(Path::new("/custom_ws/file.txt")).is_ok());
+        assert!(
+            server
+                .validate_path(Path::new("/custom_ws/file.txt"))
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_blacklist_substring_validation() {
+        let temp_history = tempfile::tempdir().unwrap();
         let server = Server::new(
             PathBuf::from("/zeroclaw"),
             vec!["IDENTITY".to_string()],
             vec!["/zeroclaw".to_string()],
+            temp_history.path().to_path_buf(),
         );
 
         // Exact match
-        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY")).is_err());
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/IDENTITY"))
+                .is_err()
+        );
 
         // Substring match
-        assert!(server.validate_path(Path::new("/zeroclaw/my_IDENTITY_file.txt")).is_err());
-        assert!(server.validate_path(Path::new("/zeroclaw/IDENTITY.md")).is_err());
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/my_IDENTITY_file.txt"))
+                .is_err()
+        );
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/IDENTITY.md"))
+                .is_err()
+        );
 
         // Allowed
-        assert!(server.validate_path(Path::new("/zeroclaw/ident.txt")).is_ok());
+        assert!(
+            server
+                .validate_path(Path::new("/zeroclaw/ident.txt"))
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_validate_relative_paths() {
+        let temp_history = tempfile::tempdir().unwrap();
         let server = Server::new(
             PathBuf::from("/zeroclaw"),
             vec![],
             vec!["/zeroclaw".to_string()],
+            temp_history.path().to_path_buf(),
         );
 
         // Relative paths should resolve to workspace and be allowed
@@ -488,11 +684,13 @@ mod tests {
     #[test]
     fn test_write_and_list_files_recursive() {
         let temp_dir = tempfile::tempdir().unwrap();
+        let temp_history = tempfile::tempdir().unwrap();
         let workspace = temp_dir.path().to_path_buf();
         let server = Server::new(
             workspace.clone(),
             vec![],
             vec![workspace.to_string_lossy().to_string()],
+            temp_history.path().to_path_buf(),
         );
 
         // Test writing a file to a nested non-existent directory
@@ -541,7 +739,8 @@ mod tests {
     fn test_complex_multi_workspace_scenario() {
         let tmp_ws1 = tempfile::tempdir().unwrap();
         let tmp_ws2 = tempfile::tempdir().unwrap();
-        
+        let temp_history = tempfile::tempdir().unwrap();
+
         let ws1_path = tmp_ws1.path().to_path_buf();
         let ws2_path = tmp_ws2.path().to_path_buf();
 
@@ -552,15 +751,38 @@ mod tests {
                 ws1_path.to_string_lossy().to_string(),
                 ws2_path.to_string_lossy().to_string(),
             ],
+            temp_history.path().to_path_buf(),
         );
 
         // 1. Test writing to both workspaces
-        assert!(server.write_file(&ws1_path.join("public.txt").to_string_lossy(), "data1").is_ok());
-        assert!(server.write_file(&ws2_path.join("public.txt").to_string_lossy(), "data2").is_ok());
+        assert!(
+            server
+                .write_file(&ws1_path.join("public.txt").to_string_lossy(), "data1")
+                .is_ok()
+        );
+        assert!(
+            server
+                .write_file(&ws2_path.join("public.txt").to_string_lossy(), "data2")
+                .is_ok()
+        );
 
         // 2. Test blacklisting in both workspaces
-        assert!(server.write_file(&ws1_path.join("private_info.txt").to_string_lossy(), "secret").is_err());
-        assert!(server.write_file(&ws2_path.join("private_info.txt").to_string_lossy(), "secret").is_err());
+        assert!(
+            server
+                .write_file(
+                    &ws1_path.join("private_info.txt").to_string_lossy(),
+                    "secret"
+                )
+                .is_err()
+        );
+        assert!(
+            server
+                .write_file(
+                    &ws2_path.join("private_info.txt").to_string_lossy(),
+                    "secret"
+                )
+                .is_err()
+        );
 
         // 3. Test listing includes all workspaces
         let files = server.list_files().unwrap();
@@ -571,5 +793,57 @@ mod tests {
 
         // 4. Test access outside both workspaces
         assert!(server.validate_path(Path::new("/etc/shadow")).is_err());
+    }
+
+    #[test]
+    fn test_rollback_functionality() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_history = tempfile::tempdir().unwrap();
+        let workspace = temp_dir.path().to_path_buf();
+        let server = Server::new(
+            workspace.clone(),
+            vec![],
+            vec![workspace.to_string_lossy().to_string()],
+            temp_history.path().to_path_buf(),
+        );
+
+        let file_path = "test.txt";
+        let content1 = "initial content";
+        let content2 = "updated content";
+
+        // 1. Rollback creation
+        server.write_file(file_path, content1).unwrap();
+        assert!(workspace.join(file_path).exists());
+        server.rollback().unwrap();
+        assert!(!workspace.join(file_path).exists());
+
+        // 2. Rollback update
+        server.write_file(file_path, content1).unwrap();
+        server.write_file(file_path, content2).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join(file_path)).unwrap(),
+            content2
+        );
+        server.rollback().unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join(file_path)).unwrap(),
+            content1
+        );
+
+        // 3. Rollback config update
+        let config_path = workspace.join("config.toml");
+        fs::write(&config_path, "key = \"old\"").unwrap();
+        server.set_config_value("key", "\"new\"").unwrap();
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("\"new\"")
+        );
+        server.rollback().unwrap();
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("\"old\"")
+        );
     }
 }

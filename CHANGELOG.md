@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-04-25
+### Added
+- Persistent rollback functionality with automatic backups.
+- New `rollback` tool to undo file and configuration changes.
+
 ## [0.1.2] - 2026-04-24
 ### Added
 - Recursive file listing using `walkdir`.
