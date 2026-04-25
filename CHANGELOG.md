@@ -4,8 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [0.1.3] - 2026-04-25
 ### Added
-- Persistent rollback functionality with automatic backups.
+- Persistent rollback functionality with high-precision (nanosecond) backups.
 - New `rollback` tool to undo file and configuration changes.
+- Advanced editing tools: `append_to_file` and `replace_in_file`.
+- New `--setup` CLI command for automatic ZeroClaw configuration.
 
 ## [0.1.2] - 2026-04-24
 ### Added
