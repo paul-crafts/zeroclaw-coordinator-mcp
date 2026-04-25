@@ -239,6 +239,31 @@ impl Server {
                             "name": "rollback",
                             "description": "Rollback the last change made by the server",
                             "inputSchema": { "type": "object", "properties": {} }
+                        },
+                        {
+                            "name": "append_to_file",
+                            "description": "Append content to a file in the workspace",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "content": { "type": "string" }
+                                },
+                                "required": ["path", "content"]
+                            }
+                        },
+                        {
+                            "name": "replace_in_file",
+                            "description": "Replace text in a file in the workspace",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "target": { "type": "string", "description": "The text to be replaced" },
+                                    "replacement": { "type": "string", "description": "The text to replace with" }
+                                },
+                                "required": ["path", "target", "replacement"]
+                            }
                         }
                     ]
                 })),
@@ -301,6 +326,32 @@ impl Server {
                         ),
                         Err(e) => self.error(req.id, -32000, e.to_string()),
                     },
+                    "append_to_file" => {
+                        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Err(e) = self.validate_path(Path::new(path_str)) {
+                            return self.error(req.id, -32001, e.to_string());
+                        }
+                        match self.append_to_file(path_str, content) {
+                            Ok(_) => self.success(req.id, json!({ "content": [{ "type": "text", "text": "Content appended successfully" }] })),
+                            Err(e) => self.error(req.id, -32000, e.to_string()),
+                        }
+                    }
+                    "replace_in_file" => {
+                        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                        let replacement = args
+                            .get("replacement")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Err(e) = self.validate_path(Path::new(path_str)) {
+                            return self.error(req.id, -32001, e.to_string());
+                        }
+                        match self.replace_in_file(path_str, target, replacement) {
+                            Ok(_) => self.success(req.id, json!({ "content": [{ "type": "text", "text": "Text replaced successfully" }] })),
+                            Err(e) => self.error(req.id, -32000, e.to_string()),
+                        }
+                    }
                     _ => self.error(req.id, -32601, "Method not found".to_string()),
                 }
             }
@@ -387,10 +438,46 @@ impl Server {
         fs::write(config_path, doc.to_string()).context("Failed to save config.toml")
     }
 
+    fn append_to_file(&self, rel_path: &str, content: &str) -> Result<()> {
+        let path = if Path::new(rel_path).is_absolute() {
+            PathBuf::from(rel_path)
+        } else {
+            self.workspace.join(rel_path)
+        };
+        self.validate_path(&path)?;
+        self.record_change(&path)?;
+        let mut existing_content = if path.exists() {
+            fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        if !existing_content.is_empty() && !existing_content.ends_with('\n') {
+            existing_content.push('\n');
+        }
+        existing_content.push_str(content);
+        if !content.ends_with('\n') {
+            existing_content.push('\n');
+        }
+        fs::write(path, existing_content).context("Failed to append to file")
+    }
+
+    fn replace_in_file(&self, rel_path: &str, target: &str, replacement: &str) -> Result<()> {
+        let path = if Path::new(rel_path).is_absolute() {
+            PathBuf::from(rel_path)
+        } else {
+            self.workspace.join(rel_path)
+        };
+        self.validate_path(&path)?;
+        self.record_change(&path)?;
+        let content = fs::read_to_string(&path).context("Failed to read file for replacement")?;
+        let new_content = content.replace(target, replacement);
+        fs::write(path, new_content).context("Failed to write file after replacement")
+    }
+
     fn record_change(&self, path: &Path) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs();
+            .as_nanos();
         if path.exists() {
             let old_content = fs::read_to_string(path)?;
             let filename = path
@@ -400,14 +487,14 @@ impl Server {
             let backup_filename = format!("{}_{}", timestamp, filename);
             fs::write(self.history.history_dir.join(&backup_filename), old_content)?;
             self.history.add_entry(HistoryEntry {
-                timestamp,
+                timestamp: (timestamp / 1_000_000_000) as u64,
                 path: path.to_path_buf(),
                 change_type: ChangeType::Update,
                 backup_file: Some(backup_filename),
             })?;
         } else {
             self.history.add_entry(HistoryEntry {
-                timestamp,
+                timestamp: (timestamp / 1_000_000_000) as u64,
                 path: path.to_path_buf(),
                 change_type: ChangeType::Create,
                 backup_file: None,
@@ -840,10 +927,45 @@ mod tests {
                 .contains("\"new\"")
         );
         server.rollback().unwrap();
-        assert!(
-            fs::read_to_string(&config_path)
-                .unwrap()
-                .contains("\"old\"")
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("\"old\""));
+    }
+
+    #[test]
+    fn test_advanced_editing_tools() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_history = tempfile::tempdir().unwrap();
+        let workspace = temp_dir.path().to_path_buf();
+        let server = Server::new(
+            workspace.clone(),
+            vec![],
+            vec![workspace.to_string_lossy().to_string()],
+            temp_history.path().to_path_buf(),
         );
+
+        let file_path = "edit_test.txt";
+
+        // 1. Test append_to_file
+        server.append_to_file(file_path, "line 1").unwrap();
+        server.append_to_file(file_path, "line 2").unwrap();
+        let content = fs::read_to_string(workspace.join(file_path)).unwrap();
+        assert!(content.contains("line 1\nline 2\n"));
+
+        // 2. Test replace_in_file
+        server
+            .replace_in_file(file_path, "line 1", "first line")
+            .unwrap();
+        let content = fs::read_to_string(workspace.join(file_path)).unwrap();
+        assert!(content.contains("first line\nline 2\n"));
+
+        // 3. Test rollback of advanced tools
+        server.rollback().unwrap(); // undo replace
+        let content = fs::read_to_string(workspace.join(file_path)).unwrap();
+        assert!(content.contains("line 1\nline 2\n"));
+
+        server.rollback().unwrap(); // undo second append
+        let content = fs::read_to_string(workspace.join(file_path)).unwrap();
+        assert_eq!(content, "line 1\n");
     }
 }
