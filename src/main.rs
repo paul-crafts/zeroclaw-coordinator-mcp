@@ -927,9 +927,11 @@ mod tests {
                 .contains("\"new\"")
         );
         server.rollback().unwrap();
-        assert!(fs::read_to_string(&config_path)
-            .unwrap()
-            .contains("\"old\""));
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("\"old\"")
+        );
     }
 
     #[test]
