@@ -188,7 +188,7 @@ impl Server {
                 result: Some(json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "zeroclaw-coordinator", "version": "0.1.3" }
+                    "serverInfo": { "name": "zeroclaw-coordinator", "version": "0.1.4" }
                 })),
                 error: None,
             },
@@ -534,51 +534,63 @@ fn configure_mcp_server(config_path: &Path, exe_path: &Path) -> Result<()> {
     let content = fs::read_to_string(config_path)?;
     let mut doc: DocumentMut = content.parse().context("Failed to parse config.toml")?;
 
-    // Ensure [mcp] exists and is enabled
-    if doc.get("mcp").is_none() {
+    // 1. Ensure [mcp] exists and is a regular Table
+    if let Some(mcp) = doc.get_mut("mcp") {
+        if !mcp.is_table() {
+            *mcp = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+    } else {
         doc.insert("mcp", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let mcp = doc.get_mut("mcp").unwrap();
-    mcp["enabled"] = toml_edit::value(true);
 
-    // Get or create mcp.servers array of tables
-    if mcp.get("servers").is_none() {
-        mcp.as_table_mut().unwrap().insert(
+    let mcp = doc.get_mut("mcp").unwrap().as_table_mut().unwrap();
+    mcp.insert("enabled", toml_edit::value(true));
+
+    // 2. Ensure mcp.servers exists and is an ArrayOfTables
+    if let Some(servers) = mcp.get_mut("servers") {
+        if servers.as_array_of_tables().is_none() {
+            *servers = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+        }
+    } else {
+        mcp.insert(
             "servers",
             toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
         );
     }
 
-    let servers = mcp.get_mut("servers").unwrap();
-    if let Some(servers_array) = servers.as_array_of_tables_mut() {
-        // Check if "coordinator" already exists
-        let mut found = false;
-        for server in servers_array.iter_mut() {
-            if server.get("name").and_then(|n| n.as_str()) == Some("coordinator") {
-                server["command"] = toml_edit::value(&exe_str);
-                let mut args = toml_edit::Array::new();
-                args.push("--transport");
-                args.push("stdio");
-                server["args"] = toml_edit::Item::Value(toml_edit::Value::Array(args));
-                found = true;
-                break;
-            }
-        }
+    let servers = mcp
+        .get_mut("servers")
+        .unwrap()
+        .as_array_of_tables_mut()
+        .unwrap();
 
-        if !found {
-            let mut new_server = toml_edit::Table::new();
-            new_server.insert("name", toml_edit::value("coordinator"));
-            new_server.insert("transport", toml_edit::value("stdio"));
-            new_server.insert("command", toml_edit::value(&exe_str));
+    // 3. Find or Add the coordinator server
+    let mut found = false;
+    for server in servers.iter_mut() {
+        if server.get("name").and_then(|n| n.as_str()) == Some("coordinator") {
+            server["command"] = toml_edit::value(&exe_str);
             let mut args = toml_edit::Array::new();
             args.push("--transport");
             args.push("stdio");
-            new_server.insert(
-                "args",
-                toml_edit::Item::Value(toml_edit::Value::Array(args)),
-            );
-            servers_array.push(new_server);
+            server["args"] = toml_edit::Item::Value(toml_edit::Value::Array(args));
+            found = true;
+            break;
         }
+    }
+
+    if !found {
+        let mut new_server = toml_edit::Table::new();
+        new_server.insert("name", toml_edit::value("coordinator"));
+        new_server.insert("transport", toml_edit::value("stdio"));
+        new_server.insert("command", toml_edit::value(&exe_str));
+        let mut args = toml_edit::Array::new();
+        args.push("--transport");
+        args.push("stdio");
+        new_server.insert(
+            "args",
+            toml_edit::Item::Value(toml_edit::Value::Array(args)),
+        );
+        servers.push(new_server);
     }
 
     fs::write(config_path, doc.to_string())?;
@@ -649,7 +661,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|a| a == "--setup") {
         run_setup()?;
-        return Ok(());
+        std::process::exit(0);
     }
 
     tracing_subscriber::registry()

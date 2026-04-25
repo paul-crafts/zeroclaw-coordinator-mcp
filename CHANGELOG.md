@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2026-04-25
+### Fixed
+- Resolved a hang in the `--setup` command by ensuring immediate process exit.
+- Improved TOML configuration logic to robustly handle existing `mcp.servers` keys of different types.
+### Added
+- Comprehensive Agent Prompt in README.md for automated self-configuration.
+
 ## [0.1.3] - 2026-04-25
 ### Added
 - Persistent rollback functionality with high-precision (nanosecond) backups.

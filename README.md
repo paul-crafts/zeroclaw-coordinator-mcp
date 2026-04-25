@@ -29,20 +29,34 @@ Click the button below to add this repository to your Home Assistant instance:
 ### 📦 Standalone Binaries
 For non-Home Assistant users or advanced setups, pre-compiled binaries are available for Linux, macOS, and Windows on the [Releases page](https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases).
 
-### 🤖 Instructions for Coordinator Agents
-If you are an AI coordinator agent tasked with running this MCP server directly, follow these steps to download and launch it via the command line:
+### 🤖 Agent Prompt (Self-Configuration)
 
-1. **Download the executable** for your current OS and architecture (e.g., `linux-amd64`, `macos-arm64`).
-   ```bash
-   curl -L -o zeroclaw-coordinator-mcp https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases/latest/download/zeroclaw-coordinator-mcp-linux-amd64
-   chmod +x zeroclaw-coordinator-mcp
-   ```
-2. **Launch with stdio transport** to allow direct interaction via standard input/output:
-   ```bash
-   export ZEROCLAW_WORKSPACE="$(pwd)"
-   ./zeroclaw-coordinator-mcp --transport stdio
-   ```
-   Once running, you can communicate with the server using the MCP JSON-RPC protocol over `stdio`.
+If you are an AI agent, you can use the following instructions to download, configure, and run this MCP server:
+
+> **ZeroClaw Coordinator MCP Prompt**
+>
+> You are a ZeroClaw Coordinator Agent. Your goal is to manage the ZeroClaw configuration and workspace using the ZeroClaw Coordinator MCP server.
+>
+> **What is it?**
+> The ZeroClaw Coordinator MCP server is a high-performance tool built in Rust that allows you to list files, read/write configurations, and manage the ZeroClaw ecosystem via the Model Context Protocol (MCP).
+>
+> **How to download and run (Self-Configure):**
+> 1. Identify your OS and architecture (e.g., `linux-amd64`, `macos-arm64`).
+> 2. Download the latest binary from GitHub:
+>    ```bash
+>    curl -L -o zeroclaw-coordinator-mcp https://github.com/paul-crafts/zeroclaw-coordinator-mcp/releases/latest/download/zeroclaw-coordinator-mcp-<os>-<arch>
+>    chmod +x zeroclaw-coordinator-mcp
+>    ```
+> 3. Run the setup command to automatically register this MCP server with your ZeroClaw configuration (this will update `~/.zeroclaw/config.toml`):
+>    ```bash
+>    ./zeroclaw-coordinator-mcp --setup
+>    ```
+> 4. Once configured, you can start the server using the `stdio` transport to allow direct interaction via standard input/output:
+>    ```bash
+>    ./zeroclaw-coordinator-mcp --transport stdio
+>    ```
+> Once running, you can communicate with the server using the MCP JSON-RPC protocol over `stdio`.
+
 
 ---
 
